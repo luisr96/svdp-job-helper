@@ -7,22 +7,33 @@ or retry loops, so plain Python is the right tool (LangGraph is reserved for
 the resume generate -> verify -> retry phase later, where there's an actual
 decision graph).
 
-    python daily_etl.py
+    python etl/daily_etl.py
+
+This file lives in etl/, but db.py and config.py are shared across every
+phase of the project (resume intake, matching, tailoring will all need them
+too), so they stay one level up at the project root. The sys.path line below
+makes that work regardless of which directory you run this from or whether
+you use `python etl/daily_etl.py` or `python -m etl.daily_etl` -- no need to
+remember which invocation style applies here, both just work.
 
 Each major step commits on its own, so a failure partway through (e.g. the
 extraction batch submission times out) doesn't roll back the jobs that were
 already pulled and saved that day.
 """
 import logging
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # project root, for db.py / config.py
 
 import anthropic
 import psycopg2.extras
 
 import db
-from etl.adzuna_client import AdzunaClient, normalize_job
+from adzuna_client import AdzunaClient, normalize_job
 from config import load_config
-from etl.extraction import build_batch_requests, collect_batch_results, get_batch_status, submit_batch
+from extraction import build_batch_requests, collect_batch_results, get_batch_status, submit_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("daily_etl")
@@ -33,9 +44,11 @@ def collect_pending_batch(cur, client, config) -> None:
     before doing anything else today."""
     pending = db.get_pending_batch(cur)
     if not pending:
+        log.info("No extraction batch pending from a previous run.")
         return
 
     batch_id = pending["extraction_batch_id"]
+    log.info("Checking status of pending extraction batch %s...", batch_id)
     status = get_batch_status(client, batch_id)
     if status != "ended":
         log.info("Batch %s still processing (status=%s); will check again next run.", batch_id, status)
@@ -86,11 +99,14 @@ def pull_category(cur, adzuna: AdzunaClient, category: dict) -> tuple[int, int]:
 
 
 def main() -> None:
+    log.info("Starting daily ETL run...")
     config = load_config()
     client = anthropic.Anthropic(api_key=config.anthropic_api_key)
     adzuna = AdzunaClient(config)
 
+    log.info("Connecting to database...")
     with db.get_connection(config) as conn:
+        log.info("Connected.")
         cur = conn.cursor()
         run = db.get_or_create_today_run(cur)
         conn.commit()
@@ -99,15 +115,39 @@ def main() -> None:
             collect_pending_batch(cur, client, config)
             conn.commit()
 
+            log.info("Fetching Adzuna category list...")
+            categories = adzuna.get_categories()
+            log.info("Got %d categories. Pulling listings (this is the slow part -- one Adzuna "
+                     "request per category per page, up to %d pages each)...",
+                     len(categories), config.adzuna_max_pages_per_category)
+
             category_counts = {}
             jobs_new = 0
             jobs_updated = 0
-            for category in adzuna.get_categories():
-                seen, new = pull_category(cur, adzuna, category)
-                category_counts[category["tag"]] = {"seen": seen, "new": new}
-                jobs_new += new
-                jobs_updated += seen - new
-                conn.commit()  # commit per category so one bad category can't lose the rest
+            for i, category in enumerate(categories, start=1):
+                try:
+                    seen, new = pull_category(cur, adzuna, category)
+                    category_counts[category["tag"]] = {"seen": seen, "new": new}
+                    jobs_new += new
+                    jobs_updated += seen - new
+                    conn.commit()  # commit per category so one bad category can't lose the rest
+                    log.info("  [%d/%d] %s: %d seen, %d new", i, len(categories), category["tag"], seen, new)
+                except Exception:
+                    conn.rollback()
+                    log.exception("  [%d/%d] %s: failed after retries -- skipping it for today, "
+                                  "continuing with the rest", i, len(categories), category["tag"])
+                    category_counts[category["tag"]] = {"error": True}
+
+                # Keep etl_runs current after every category, not just at the
+                # very end -- so if something does crash later, today's run
+                # still shows accurate partial progress instead of zeros.
+                db.update_run(
+                    cur, run["id"],
+                    jobs_new=jobs_new, jobs_updated=jobs_updated,
+                    category_counts=psycopg2.extras.Json(category_counts),
+                )
+                conn.commit()
+
             log.info("Pulled %d categories: %d new jobs, %d re-seen", len(category_counts), jobs_new, jobs_updated)
 
             jobs_expired = db.mark_expired(cur, config.expiry_days)

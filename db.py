@@ -185,3 +185,69 @@ def update_run(cur, run_id: str, **fields) -> None:
     set_clause = ", ".join(f"{key} = %({key})s" for key in fields)
     fields = dict(fields, run_id=run_id)
     cur.execute(f"update etl_runs set {set_clause} where id = %(run_id)s", fields)
+
+
+# ---------------------------------------------------------------------------
+# candidates
+# ---------------------------------------------------------------------------
+
+def insert_candidate(cur, extracted: dict, raw_resume_text: str, source_filename: str, extraction_model: str) -> str:
+    cur.execute(
+        """
+        insert into candidates (
+            full_name, email, phone, location_text, summary,
+            work_history, education, skills, certifications_licenses,
+            raw_extraction, extraction_model, source_filename, raw_resume_text
+        ) values (
+            %(full_name)s, %(email)s, %(phone)s, %(location_text)s, %(summary)s,
+            %(work_history)s, %(education)s, %(skills)s, %(certifications_licenses)s,
+            %(raw_extraction)s, %(extraction_model)s, %(source_filename)s, %(raw_resume_text)s
+        )
+        returning id
+        """,
+        {
+            "full_name": extracted.get("full_name"),
+            "email": extracted.get("email"),
+            "phone": extracted.get("phone"),
+            "location_text": extracted.get("location"),
+            "summary": extracted.get("summary"),
+            "work_history": psycopg2.extras.Json(extracted.get("work_history") or []),
+            "education": psycopg2.extras.Json(extracted.get("education") or []),
+            "skills": extracted.get("skills") or [],
+            "certifications_licenses": extracted.get("certifications_licenses") or [],
+            "raw_extraction": psycopg2.extras.Json(extracted),
+            "extraction_model": extraction_model,
+            "source_filename": source_filename,
+            "raw_resume_text": raw_resume_text,
+        },
+    )
+    return cur.fetchone()["id"]
+
+
+def get_pending_candidates(cur) -> list[dict]:
+    cur.execute("select * from candidates where review_status = 'pending_review' order by created_at")
+    return cur.fetchall()
+
+
+def update_candidate_fields(cur, candidate_id: str, fields: dict) -> None:
+    """`fields` values for work_history/education must already be wrapped in
+    psycopg2.extras.Json(...) by the caller -- same convention as update_run."""
+    if not fields:
+        return
+    set_clause = ", ".join(f"{key} = %({key})s" for key in fields)
+    fields = dict(fields, candidate_id=candidate_id)
+    cur.execute(
+        f"update candidates set {set_clause}, updated_at = now() where id = %(candidate_id)s",
+        fields,
+    )
+
+
+def set_review_status(cur, candidate_id: str, status: str, reviewed_by: str) -> None:
+    cur.execute(
+        """
+        update candidates
+        set review_status = %s, reviewed_by = %s, reviewed_at = now(), updated_at = now()
+        where id = %s
+        """,
+        (status, reviewed_by, candidate_id),
+    )

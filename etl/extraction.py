@@ -4,7 +4,12 @@ Batch API (50% cheaper, ~24h turnaround is fine here -- see daily_etl.py
 for how a single daily cron collects yesterday's batch before submitting
 today's).
 """
-import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # project root, for json_extract.py
+
+from json_extract import extract_json
 
 EXTRACTION_SYSTEM_PROMPT = """\
 You extract structured requirements from job postings for a job-matching system.
@@ -62,20 +67,18 @@ def get_batch_status(client, batch_id: str) -> str:
 
 
 def collect_batch_results(client, batch_id: str):
-    """Yields (job_id, parsed_dict_or_None) for every request in the batch.
-    None means the request errored, was canceled/expired, or Haiku's output
-    wasn't valid JSON -- callers should skip those rather than crash."""
+    """Yields (job_id, parsed_dict_or_None, raw_text) for every request in
+    the batch. raw_text is included even on success so a caller can log a
+    sample on failure -- exactly the kind of bug (model wrapping JSON in a
+    markdown fence despite being told not to) that's invisible until you
+    actually look at the raw output, which is what happened here."""
     for entry in client.messages.batches.results(batch_id):
         job_id = entry.custom_id
         if entry.result.type != "succeeded":
-            yield job_id, None
+            yield job_id, None, f"(request {entry.result.type}, no text returned)"
             continue
 
         text = "".join(
             block.text for block in entry.result.message.content if block.type == "text"
         )
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-        yield job_id, parsed
+        yield job_id, extract_json(text), text

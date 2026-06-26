@@ -5,10 +5,44 @@ turns Adzuna's raw job dict into the shape our `jobs` table expects.
 Note on `salary_is_predicted`: Adzuna returns it as the string "0"/"1", not
 a real boolean -- normalize_job() converts it.
 """
+import logging
+import time
+
 import psycopg2.extras
 import requests
 
+log = logging.getLogger("adzuna_client")
+
 ADZUNA_BASE = "https://api.adzuna.com/v1/api"
+
+
+def _get_with_retry(url: str, params: dict, max_attempts: int = 3, backoff_seconds: int = 5) -> requests.Response:
+    """Adzuna occasionally returns a transient 5xx, or the connection times
+    out -- retry a few times with a short backoff before giving up. 4xx
+    errors (bad credentials, bad params) are NOT retried, since retrying
+    won't fix those and we want to fail fast on a real problem."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(url, params=params, timeout=30)
+            resp.raise_for_status()
+            return resp
+        except requests.exceptions.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            if status and 500 <= status < 600 and attempt < max_attempts:
+                wait = backoff_seconds * attempt
+                log.warning("Adzuna returned %s, retrying in %ds (attempt %d/%d)...",
+                            status, wait, attempt, max_attempts)
+                time.sleep(wait)
+                continue
+            raise
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+            if attempt < max_attempts:
+                wait = backoff_seconds * attempt
+                log.warning("Network error reaching Adzuna (%s), retrying in %ds (attempt %d/%d)...",
+                            exc, wait, attempt, max_attempts)
+                time.sleep(wait)
+                continue
+            raise
 
 
 class AdzunaClient:
@@ -28,8 +62,7 @@ class AdzunaClient:
         """Fetch the current category list live -- not persisted anywhere,
         since it's cheap to call and we don't want a stale hardcoded list."""
         url = f"{ADZUNA_BASE}/jobs/{self.config.adzuna_country}/categories"
-        resp = requests.get(url, params=self._params(), timeout=30)
-        resp.raise_for_status()
+        resp = _get_with_retry(url, self._params())
         data = resp.json()
         return [{"tag": c["tag"], "label": c["label"]} for c in data.get("results", [])]
 
@@ -42,8 +75,7 @@ class AdzunaClient:
             results_per_page=self.config.adzuna_results_per_page,
             sort_by="date",
         )
-        resp = requests.get(url, params=params, timeout=30)
-        resp.raise_for_status()
+        resp = _get_with_retry(url, params)
         return resp.json().get("results", [])
 
 

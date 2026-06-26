@@ -34,7 +34,8 @@ class Config:
 
     # Anthropic
     anthropic_api_key: str
-    extraction_model: str
+    extraction_model: str          # Haiku -- cheap structured extraction for job postings
+    resume_extraction_model: str   # Sonnet -- resume parsing needs more judgment, volume is tiny either way
 
     # ETL behavior
     expiry_days: int             # days a listing can go unseen before we mark it expired
@@ -52,5 +53,6 @@ def load_config() -> Config:
         adzuna_results_per_page=int(os.environ.get("ADZUNA_RESULTS_PER_PAGE", "50")),
         anthropic_api_key=_require("ANTHROPIC_API_KEY"),
         extraction_model=os.environ.get("EXTRACTION_MODEL", "claude-haiku-4-5-20251001"),
+        resume_extraction_model=os.environ.get("RESUME_EXTRACTION_MODEL", "claude-sonnet-4-6"),
         expiry_days=int(os.environ.get("EXPIRY_DAYS", "10")),
     )

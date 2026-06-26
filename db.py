@@ -8,6 +8,9 @@ from contextlib import contextmanager
 
 import psycopg2
 import psycopg2.extras
+from pgvector.psycopg2 import register_vector
+
+psycopg2.extras.register_uuid()  # uuid/uuid[] columns come back as UUID objects, not raw strings
 
 
 @contextmanager
@@ -17,6 +20,7 @@ def get_connection(config):
         cursor_factory=psycopg2.extras.RealDictCursor,
         connect_timeout=10,  # fail loudly within 10s rather than hanging on a bad host/network
     )
+    register_vector(conn)  # lets vector columns round-trip as plain Python lists
     try:
         yield conn
     except Exception:
@@ -251,3 +255,51 @@ def set_review_status(cur, candidate_id: str, status: str, reviewed_by: str) -> 
         """,
         (status, reviewed_by, candidate_id),
     )
+
+
+# ---------------------------------------------------------------------------
+# matching
+# ---------------------------------------------------------------------------
+
+def get_confirmed_candidate(cur, candidate_id: str) -> dict | None:
+    cur.execute(
+        "select * from candidates where id = %s and review_status = 'confirmed'",
+        (candidate_id,),
+    )
+    return cur.fetchone()
+
+
+def get_shortlist_for_candidate(cur, candidate_embedding, limit: int = 25) -> list[dict]:
+    """Stage 1 (cheap filter) + stage 2 (embedding similarity) in one query:
+    active jobs only, ordered by semantic closeness to the candidate's
+    embedding. No category/salary/etc. pre-filtering on purpose -- see the
+    design discussion for why narrowing aggressively before the semantic
+    stage risks false negatives on legitimate cross-category fits."""
+    cur.execute(
+        """
+        select j.id, j.title, j.company_name, j.location_display,
+               j.contract_time, j.salary_min, j.salary_max, j.redirect_url,
+               r.skills, r.employment_type, r.education_level, r.licenses_certifications,
+               r.embedding <=> %(candidate_embedding)s as distance
+        from jobs j
+        join job_requirements r on r.job_id = j.id
+        where j.status = 'active'
+          and r.embedding is not null
+        order by distance
+        limit %(limit)s
+        """,
+        {"candidate_embedding": candidate_embedding, "limit": limit},
+    )
+    return cur.fetchall()
+
+
+def insert_match_run(cur, candidate_id: str, shortlist_job_ids: list, llm_model: str, llm_output: dict) -> str:
+    cur.execute(
+        """
+        insert into match_runs (candidate_id, shortlist_job_ids, llm_model, llm_output)
+        values (%s, %s::uuid[], %s, %s)
+        returning id
+        """,
+        (candidate_id, shortlist_job_ids, llm_model, psycopg2.extras.Json(llm_output)),
+    )
+    return cur.fetchone()["id"]

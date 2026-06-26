@@ -21,9 +21,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # project root, for db.py / config.py
 
 import psycopg2.extras
+import voyageai
 
 import db
 from config import load_config
+from embeddings import embed_candidate
 
 SCALAR_FIELDS = ["full_name", "email", "phone", "location_text", "summary"]
 LIST_FIELDS = ["skills", "certifications_licenses"]
@@ -82,7 +84,7 @@ def edit_in_editor(value):
     return edited
 
 
-def review_candidate(cur, candidate: dict, reviewer: str) -> str:
+def review_candidate(cur, candidate: dict, reviewer: str, voyage_client) -> str:
     """Returns 'confirmed', 'rejected', 'skipped', or 'quit'."""
     print_candidate(candidate)
     while True:
@@ -90,6 +92,7 @@ def review_candidate(cur, candidate: dict, reviewer: str) -> str:
 
         if choice == "y":
             db.set_review_status(cur, candidate["id"], "confirmed", reviewer)
+            embed_candidate(cur, voyage_client, candidate)
             return "confirmed"
 
         if choice == "e":
@@ -104,10 +107,22 @@ def review_candidate(cur, candidate: dict, reviewer: str) -> str:
             for field in JSON_FIELDS:
                 count = len(candidate.get(field) or [])
                 if input(f"  Edit {field} ({count} entries)? (y/N): ").strip().lower() == "y":
-                    updates[field] = psycopg2.extras.Json(edit_in_editor(candidate.get(field) or []))
+                    updates[field] = edit_in_editor(candidate.get(field) or [])
+
             if updates:
-                db.update_candidate_fields(cur, candidate["id"], updates)
+                # Write the JSON fields wrapped for psycopg2, but keep a plain
+                # (unwrapped) merged copy around to build the embedding text
+                # from -- the embedding should reflect what the reviewer just
+                # edited, not the original extraction.
+                db_updates = {
+                    k: (psycopg2.extras.Json(v) if k in JSON_FIELDS else v)
+                    for k, v in updates.items()
+                }
+                db.update_candidate_fields(cur, candidate["id"], db_updates)
+                candidate = {**candidate, **updates}
+
             db.set_review_status(cur, candidate["id"], "confirmed", reviewer)
+            embed_candidate(cur, voyage_client, candidate)
             return "confirmed"
 
         if choice == "s":
@@ -125,6 +140,7 @@ def review_candidate(cur, candidate: dict, reviewer: str) -> str:
 
 def main() -> None:
     config = load_config()
+    voyage_client = voyageai.Client(api_key=config.voyage_api_key)
     reviewer = input("Reviewer name: ").strip() or "unknown"
 
     with db.get_connection(config) as conn:
@@ -137,7 +153,7 @@ def main() -> None:
         print(f"{len(pending)} candidate(s) waiting for review.")
         confirmed = rejected = skipped = 0
         for candidate in pending:
-            result = review_candidate(cur, candidate, reviewer)
+            result = review_candidate(cur, candidate, reviewer, voyage_client)
             conn.commit()
             if result == "confirmed":
                 confirmed += 1

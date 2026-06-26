@@ -36,6 +36,10 @@ class Config:
     anthropic_api_key: str
     extraction_model: str          # Haiku -- cheap structured extraction for job postings
     resume_extraction_model: str   # Sonnet -- resume parsing needs more judgment, volume is tiny either way
+    matching_model: str            # Sonnet -- reasoning over a candidate's shortlist
+
+    # Voyage AI (embeddings -- Anthropic doesn't offer its own embedding model)
+    voyage_api_key: str
 
     # ETL behavior
     expiry_days: int             # days a listing can go unseen before we mark it expired
@@ -54,5 +58,7 @@ def load_config() -> Config:
         anthropic_api_key=_require("ANTHROPIC_API_KEY"),
         extraction_model=os.environ.get("EXTRACTION_MODEL", "claude-haiku-4-5-20251001"),
         resume_extraction_model=os.environ.get("RESUME_EXTRACTION_MODEL", "claude-sonnet-4-6"),
+        matching_model=os.environ.get("MATCHING_MODEL", "claude-sonnet-4-6"),
+        voyage_api_key=_require("VOYAGE_API_KEY"),
         expiry_days=int(os.environ.get("EXPIRY_DAYS", "10")),
     )

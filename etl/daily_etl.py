@@ -29,10 +29,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # project root,
 
 import anthropic
 import psycopg2.extras
+import voyageai
 
 import db
 from adzuna_client import AdzunaClient, normalize_job
 from config import load_config
+from embeddings import backfill_job_embeddings
 from extraction import build_batch_requests, collect_batch_results, get_batch_status, submit_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -102,6 +104,7 @@ def main() -> None:
     log.info("Starting daily ETL run...")
     config = load_config()
     client = anthropic.Anthropic(api_key=config.anthropic_api_key)
+    voyage_client = voyageai.Client(api_key=config.voyage_api_key)
     adzuna = AdzunaClient(config)
 
     log.info("Connecting to database...")
@@ -153,6 +156,11 @@ def main() -> None:
             jobs_expired = db.mark_expired(cur, config.expiry_days)
             conn.commit()
             log.info("Marked %d jobs expired (unseen for %d+ days)", jobs_expired, config.expiry_days)
+
+            embedded = backfill_job_embeddings(cur, voyage_client)
+            conn.commit()
+            if embedded:
+                log.info("Embedded %d job(s) for matching", embedded)
 
             to_extract = db.get_jobs_needing_extraction(cur, config.extraction_model)
             batch_id = None

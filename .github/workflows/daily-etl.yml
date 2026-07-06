@@ -9,7 +9,7 @@ on:
 jobs:
   run-etl:
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # safety net -- fail the run rather than let it hang indefinitely
+    timeout-minutes: 35 # safety net -- fail the run rather than let it hang indefinitely
 
     steps:
       - name: Check out repo

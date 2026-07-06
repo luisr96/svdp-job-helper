@@ -38,4 +38,4 @@ jobs:
           ADZUNA_MAX_PAGES: ${{ vars.ADZUNA_MAX_PAGES }}
           ADZUNA_RESULTS_PER_PAGE: ${{ vars.ADZUNA_RESULTS_PER_PAGE }}
           EXPIRY_DAYS: ${{ vars.EXPIRY_DAYS }}
-        run: python -m etl.daily_etl
+        run: python etl/daily_etl.py

@@ -1,9 +1,5 @@
 """
-Thin wrapper around the two Adzuna endpoints we use, plus the function that
-turns Adzuna's raw job dict into the shape our `jobs` table expects.
-
-Note on `salary_is_predicted`: Adzuna returns it as the string "0"/"1", not
-a real boolean -- normalize_job() converts it.
+Thin wrapper around the Adzuna endpoints, plus util functions
 """
 import logging
 import time
@@ -17,10 +13,7 @@ ADZUNA_BASE = "https://api.adzuna.com/v1/api"
 
 
 def _get_with_retry(url: str, params: dict, max_attempts: int = 3, backoff_seconds: int = 5) -> requests.Response:
-    """Adzuna occasionally returns a transient 5xx, or the connection times
-    out -- retry a few times with a short backoff before giving up. 4xx
-    errors (bad credentials, bad params) are NOT retried, since retrying
-    won't fix those and we want to fail fast on a real problem."""
+    """Adzuna occasionally returns a transient 5xx, a 429 (rate limited), or the connection times out. Retry a few times with backoff before giving up."""
     for attempt in range(1, max_attempts + 1):
         try:
             resp = requests.get(url, params=params, timeout=30)
@@ -28,8 +21,10 @@ def _get_with_retry(url: str, params: dict, max_attempts: int = 3, backoff_secon
             return resp
         except requests.exceptions.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else None
-            if status and 500 <= status < 600 and attempt < max_attempts:
-                wait = backoff_seconds * attempt
+            is_rate_limited = status == 429
+            is_server_error = status is not None and 500 <= status < 600
+            if (is_rate_limited or is_server_error) and attempt < max_attempts:
+                wait = backoff_seconds * attempt * (2 if is_rate_limited else 1)
                 log.warning("Adzuna returned %s, retrying in %ds (attempt %d/%d)...",
                             status, wait, attempt, max_attempts)
                 time.sleep(wait)

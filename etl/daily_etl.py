@@ -1,76 +1,21 @@
 """
-Daily job ETL: pull Adzuna listings, dedupe/expire, queue Haiku extraction.
-
-Run once a day from cron. Single script, no orchestration framework -- this
-is a linear pull -> upsert -> expire -> extract pipeline with no branching
-or retry loops, so plain Python is the right tool (LangGraph is reserved for
-the resume generate -> verify -> retry phase later, where there's an actual
-decision graph).
-
-    python etl/daily_etl.py
-
-This file lives in etl/, but db.py and config.py are shared across every
-phase of the project (resume intake, matching, tailoring will all need them
-too), so they stay one level up at the project root. The sys.path line below
-makes that work regardless of which directory you run this from or whether
-you use `python etl/daily_etl.py` or `python -m etl.daily_etl` -- no need to
-remember which invocation style applies here, both just work.
-
-Each major step commits on its own, so a failure partway through (e.g. the
-extraction batch submission times out) doesn't roll back the jobs that were
-already pulled and saved that day.
+Daily job ETL: pull Adzuna listings, dedupe, expire stale ones
 """
 import logging
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # project root, for db.py / config.py
-
-import anthropic
 import psycopg2.extras
-import voyageai
 
 import db
 from adzuna_client import AdzunaClient, normalize_job
 from config import load_config
-from embeddings import backfill_job_embeddings
-from extraction import build_batch_requests, collect_batch_results, get_batch_status, submit_batch
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("daily_etl")
 
 
-def collect_pending_batch(cur, client, config) -> None:
-    """Step 1: if a previous run's extraction batch has finished, collect it
-    before doing anything else today."""
-    pending = db.get_pending_batch(cur)
-    if not pending:
-        log.info("No extraction batch pending from a previous run.")
-        return
-
-    batch_id = pending["extraction_batch_id"]
-    log.info("Checking status of pending extraction batch %s...", batch_id)
-    status = get_batch_status(client, batch_id)
-    if status != "ended":
-        log.info("Batch %s still processing (status=%s); will check again next run.", batch_id, status)
-        return
-
-    collected = 0
-    skipped = 0
-    for job_id, parsed in collect_batch_results(client, batch_id):
-        if parsed is None:
-            skipped += 1
-            continue
-        db.upsert_job_requirements(cur, job_id, parsed, config.extraction_model)
-        collected += 1
-
-    db.update_run(cur, pending["id"], extraction_batch_status="collected")
-    log.info("Collected %d extraction results from batch %s (%d skipped)", collected, batch_id, skipped)
-
-
 def pull_category(cur, adzuna: AdzunaClient, category: dict) -> tuple[int, int]:
-    """Step 2: page through one category's listings. Returns (jobs_seen, jobs_new)."""
+    """Page through one category's listings. Returns (jobs_seen, jobs_new)."""
     seen = 0
     new = 0
     consecutive_duplicate_pages = 0
@@ -103,8 +48,6 @@ def pull_category(cur, adzuna: AdzunaClient, category: dict) -> tuple[int, int]:
 def main() -> None:
     log.info("Starting daily ETL run...")
     config = load_config()
-    client = anthropic.Anthropic(api_key=config.anthropic_api_key)
-    voyage_client = voyageai.Client(api_key=config.voyage_api_key)
     adzuna = AdzunaClient(config)
 
     log.info("Connecting to database...")
@@ -115,13 +58,10 @@ def main() -> None:
         conn.commit()
 
         try:
-            collect_pending_batch(cur, client, config)
-            conn.commit()
-
             log.info("Fetching Adzuna category list...")
             categories = adzuna.get_categories()
-            log.info("Got %d categories. Pulling listings (this is the slow part -- one Adzuna "
-                     "request per category per page, up to %d pages each)...",
+            log.info("Got %d categories. Pulling listings (one Adzuna request per "
+                     "category per page, up to %d pages each)...",
                      len(categories), config.adzuna_max_pages_per_category)
 
             category_counts = {}
@@ -157,20 +97,6 @@ def main() -> None:
             conn.commit()
             log.info("Marked %d jobs expired (unseen for %d+ days)", jobs_expired, config.expiry_days)
 
-            embedded = backfill_job_embeddings(cur, voyage_client)
-            conn.commit()
-            if embedded:
-                log.info("Embedded %d job(s) for matching", embedded)
-
-            to_extract = db.get_jobs_needing_extraction(cur, config.extraction_model)
-            batch_id = None
-            if to_extract:
-                batch_requests = build_batch_requests(to_extract, config.extraction_model)
-                batch_id = submit_batch(client, batch_requests)
-                log.info("Submitted extraction batch %s for %d jobs", batch_id, len(to_extract))
-            else:
-                log.info("No jobs need extraction today")
-
             db.update_run(
                 cur,
                 run["id"],
@@ -178,8 +104,6 @@ def main() -> None:
                 jobs_updated=jobs_updated,
                 jobs_expired=jobs_expired,
                 category_counts=psycopg2.extras.Json(category_counts),
-                extraction_batch_id=batch_id,
-                extraction_batch_status="in_progress" if batch_id else None,
                 status="success",
                 finished_at=datetime.now(timezone.utc),
             )

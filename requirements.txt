@@ -1,7 +1,4 @@
-anthropic>=0.112.0
 psycopg2-binary>=2.9.12
 requests>=2.34.2
 python-dotenv>=1.0.1
-pypdf>=5.1.0
-voyageai>=0.4.1
-pgvector>=0.4.2
+pytest>=8.3.0

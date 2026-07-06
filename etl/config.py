@@ -1,13 +1,12 @@
 """
-All knobs for the job ETL pipeline live here, loaded from environment
-variables. Nothing fancy -- a dataclass and a loader function.
+Config for the job ETL pipeline (dataclass and a loader function)
 """
 import os
 from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-load_dotenv()  # reads a .env file in the current directory (or a parent), if one exists
+load_dotenv()
 
 
 def _require(name: str) -> str:
@@ -19,7 +18,6 @@ def _require(name: str) -> str:
 
 @dataclass(frozen=True)
 class Config:
-    # Supabase / Postgres connection string, e.g.
     # postgresql://postgres:[password]@[host]:5432/postgres
     database_url: str
 
@@ -31,15 +29,6 @@ class Config:
     adzuna_distance_km: int      # search radius around `adzuna_where`
     adzuna_max_pages_per_category: int
     adzuna_results_per_page: int
-
-    # Anthropic
-    anthropic_api_key: str
-    extraction_model: str          # Haiku -- cheap structured extraction for job postings
-    resume_extraction_model: str   # Sonnet -- resume parsing needs more judgment, volume is tiny either way
-    matching_model: str            # Sonnet -- reasoning over a candidate's shortlist
-
-    # Voyage AI (embeddings -- Anthropic doesn't offer its own embedding model)
-    voyage_api_key: str
 
     # ETL behavior
     expiry_days: int             # days a listing can go unseen before we mark it expired
@@ -55,10 +44,5 @@ def load_config() -> Config:
         adzuna_distance_km=int(os.environ.get("ADZUNA_DISTANCE_KM", "20")),
         adzuna_max_pages_per_category=int(os.environ.get("ADZUNA_MAX_PAGES", "5")),
         adzuna_results_per_page=int(os.environ.get("ADZUNA_RESULTS_PER_PAGE", "50")),
-        anthropic_api_key=_require("ANTHROPIC_API_KEY"),
-        extraction_model=os.environ.get("EXTRACTION_MODEL", "claude-haiku-4-5-20251001"),
-        resume_extraction_model=os.environ.get("RESUME_EXTRACTION_MODEL", "claude-sonnet-4-6"),
-        matching_model=os.environ.get("MATCHING_MODEL", "claude-sonnet-4-6"),
-        voyage_api_key=_require("VOYAGE_API_KEY"),
         expiry_days=int(os.environ.get("EXPIRY_DAYS", "10")),
     )

@@ -1,0 +1,41 @@
+name: Daily SVDP Job ETL
+
+on:
+  schedule:
+    # 11:00 AM UTC (7:00 AM EST), every day
+    - cron: "0 11 * * *"
+  workflow_dispatch: {} # adds a manual "Run workflow" button in the Actions tab
+
+jobs:
+  run-etl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # safety net -- fail the run rather than let it hang indefinitely
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run unit tests
+        run: pytest tests/unit -v
+
+      - name: Run daily ETL
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
+          ADZUNA_COUNTRY: ${{ vars.ADZUNA_COUNTRY }}
+          ADZUNA_WHERE: ${{ vars.ADZUNA_WHERE }}
+          ADZUNA_DISTANCE_KM: ${{ vars.ADZUNA_DISTANCE_KM }}
+          ADZUNA_MAX_PAGES: ${{ vars.ADZUNA_MAX_PAGES }}
+          ADZUNA_RESULTS_PER_PAGE: ${{ vars.ADZUNA_RESULTS_PER_PAGE }}
+          EXPIRY_DAYS: ${{ vars.EXPIRY_DAYS }}
+        run: python -m etl.daily_etl
